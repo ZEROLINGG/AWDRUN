@@ -39,7 +39,7 @@ class Payload:
 
 def console_run() -> None:
     """
-    控制台运行入口：支持命令行传参或交互式输入IP，调用Payload执行攻击并输出结果。
+    手动测试入口：支持命令行传参或交互式输入IP，调用Payload执行攻击并输出结果。
     适用于手动调试场景。
     """
     _ip = None

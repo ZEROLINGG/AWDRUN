@@ -5,6 +5,8 @@ from urllib.parse import urljoin, urlparse
 import requests
 from requests import Response
 
+from config import Config
+
 
 class Send:
     headers = {
@@ -82,6 +84,7 @@ class Send:
             endpoint (str): API 端点路径
             data (Optional[Dict]): 请求体数据
             headers (Optional[Dict]): 自定义 headers
+            useform (bool): 是否使用表单方案
             **kwargs: 其他 requests 参数
 
         Returns:
@@ -117,31 +120,132 @@ class Send:
     
     def send_flag(self, flag_info: FlagInfo) -> tuple[bool, str]:
         try:
-            if flag_info.method == "post":
+            if flag_info.method == "POST":
                 r = self.post(flag_info.endpoint, data=flag_info.data, headers=flag_info.headers, params=flag_info.params)
-            elif flag_info.method == "get":
+            elif flag_info.method == "GET":
                 r = self.get(flag_info.endpoint, params=flag_info.params, headers=flag_info.headers)
             else:
-                return False,f"Invalid flag mod: {flag_info.method}"
+                return False,f"Invalid flag method: {flag_info.method}"
             r.raise_for_status()
             try:
                 result = r.json()
-            except json.decoder.JSONDecodeError:
-                result = r.text
+            except (ValueError, json.decoder.JSONDecodeError):
+                result = r.content.decode(errors="ignore")
 
             if isinstance(result, dict):
-                if str(result.get("status", "")).lower() in ["ok", "success", "成功"]:
-                    return True, ""
-                return False, json.dumps(result)
-            if ("success" in result.lower()) or ("ok" in result.lower()) or ("成功" in result):
-                return True, ""
-            return False, result
+                field = ["data", "code", "message", "info", "msg"]
+                for f in field:
+                    if str(result.get(f, "")).lower() in ["ok", "success", "成功"]:
+                        return True, ""
+                    if str(result.get(f, "")).lower() in ["error", "错误", "重新提交", "失败"]:
+                        return False, json.dumps(result)
+                return False, "[未能解析的结果]：\n" + json.dumps(result)
+            if isinstance(result, str):
+                field_success = ["ok", "success", "成功"]
+                field_error = ["error", "错误", "重新提交", "失败"]
+                for f in field_success:
+                    if f in result.lower():
+                        return True, ""
+                    
+                for f in field_error:
+                    if f in result.lower():
+                        return False, result
+                return False, "[未能解析的结果]：\n" + result
+            
+            try:
+                result = r.content.hex()
+                field_success = ["6f6b", "73756363657373", "e68890e58a9f"]
+                field_error = ["error","e99499e8afaf","e9878de696b0e68f90e4baa4","e5a4b1e8b4a5"]
+                for f in field_success:
+                    if f in result:
+                        return True, ""
+
+                for f in field_error:
+                    if f in result:
+                        return False, result
+                return False, "[未能解析的结果]：\n" + result
+            
+            except Exception as ex:
+                return False, str(ex)
         
         except Exception as ex:
             return False,str(ex)
-            
-        
-        
+
+
+def get_flag_info(config: Config, name: str, flag: str, **kwargs) -> Send.FlagInfo:
+    """
+    根据 config.flag_info 构造 Send.FlagInfo（headers, data, params）。
+    支持通过 kwargs 提供 'overrides'，格式示例:
+        overrides = {
+            "headers": {"X-Custom": "val"},
+            "data": {"exerciseId": 123},
+            "params": {"debug": "1"}
+        }
+    覆盖优先级：overrides > once(part) > base(part) > default None
+    """
+    def sj_get(cfg: Config, subject_name: str, field: str) -> Optional[Any]:
+        for sj in getattr(cfg, "subject", []) or []:
+            if sj.get("name") == subject_name:
+                return sj.get(field)
+        return None
+
+    overrides = kwargs.get("overrides", {})
+    h: Dict[str, Any] = {}
+    d: Dict[str, Any] = {}
+    p: Dict[str, Any] = {}
+
+    for fi in getattr(config, "flag_info", []) or []:
+        part = fi.get("part")
+        # 遍历字段键值
+        for key, spec in fi.items():
+            if key == "part":
+                continue
+            if not isinstance(spec, dict):
+                continue  # 非法 spec，跳过
+            hdp = str(spec.get("hdp", "")).lower()
+            # 决定值的来源
+            value = None
+            if part == "base":
+                value = spec.get("default")
+            elif part == "once":
+                if key == "flag":
+                    value = flag
+                else:
+                    value = sj_get(config, name, key)
+            else:
+                # 未知 part，可扩展或跳过
+                continue
+
+            # 若 overrides 明确指定，则覆盖
+            if key in overrides.get("headers", {}):
+                if "h" in hdp:
+                    h[key] = overrides["headers"][key]
+            if key in overrides.get("data", {}):
+                if "d" in hdp:
+                    d[key] = overrides["data"][key]
+            if key in overrides.get("params", {}):
+                if "p" in hdp:
+                    p[key] = overrides["params"][key]
+
+            # 否则使用计算得到的 value（当 value 不是 None 时）
+            if value is not None:
+                if "h" in hdp:
+                    h.setdefault(key, value)
+                if "d" in hdp:
+                    d.setdefault(key, value)
+                if "p" in hdp:
+                    p.setdefault(key, value)
+
+    # 如果希望对空 dict 传 None：
+    headers_final = h or None
+    data_final = d or None
+    params_final = p or None
+
+    return Send.FlagInfo(endpoint=config.flag_endpoint,
+                         data=data_final,
+                         headers=headers_final,
+                         params=params_final)
+
 
         
 
