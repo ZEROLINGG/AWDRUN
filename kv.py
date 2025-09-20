@@ -13,10 +13,10 @@ class Kv:
     适用于需要并发访问共享数据的场景，例如存储聊天室用户的在线信息或加密密钥。
     """
 
-    def __init__(self, cleanup_interval: int = 60, max_cleanup_batch: int = 1000):
+    def __init__(self, cleanup_interval: float = 60.0, max_cleanup_batch: int = 1000):
         """
         初始化键值存储。
-        :param cleanup_interval: 自动清理过期数据的间隔（秒）
+        :param cleanup_interval: 自动清理过期数据的间隔（秒，支持浮点数）
         :param max_cleanup_batch: 每次清理的最大键数量
         """
         # 数据存储：{key: (value, expiry_time)}，expiry_time=-1表示永不过期
@@ -140,13 +140,13 @@ class Kv:
 
                 checked += 1
 
-    async def add(self, key: str, value: Union[str, int, bool, dict, None], ttl: int = -1):
+    async def add(self, key: str, value: Union[str, int, bool, dict, None], ttl: float = -1.0):
         """
         添加或更新一个键值对。如果键已存在，则更新其值和过期时间。
         
         :param key: 键，必须是字符串。
         :param value: 值，可以是字符串、整数、布尔值、字典或None。
-        :param ttl: 存在时长（秒），-1表示永不过期（默认值）。
+        :param ttl: 存在时长（秒，支持浮点数），-1表示永不过期（默认值）。
         :raises TypeError: 如果键或值的类型不正确。
         :raises ValueError: 如果ttl小于-1。
         """
@@ -154,8 +154,10 @@ class Kv:
             raise TypeError("键 (key) 必须是字符串类型")
         if not isinstance(value, (str, int, bool, dict, type(None))):
             raise TypeError("值 (value) 必须是字符串、整数、布尔、字典或None类型")
+        if not isinstance(ttl, (int, float)):
+            raise TypeError("ttl 必须是数值类型（整数或浮点数）")
         if ttl < -1:
-            raise ValueError("ttl 必须是 -1（永不过期）或正整数（秒数）")
+            raise ValueError("ttl 必须是 -1（永不过期）或非负数（秒数）")
 
         async with self._rw_lock.writer():
             # 如果键已存在，从前缀索引中移除（稍后会重新添加）
@@ -164,7 +166,7 @@ class Kv:
 
             # 计算过期时间
             if ttl == -1:
-                expiry_time = -1  # 永不过期
+                expiry_time = -1.0  # 永不过期
             else:
                 expiry_time = time.time() + ttl
                 # 添加到过期堆
@@ -349,9 +351,9 @@ class Kv:
                     return True
             return False
 
-    async def get_ttl(self, key: str) -> Optional[int]:
+    async def get_ttl(self, key: str) -> Optional[float]:
         """
-        获取指定键的剩余存在时间（秒）。
+        获取指定键的剩余存在时间（秒，浮点数）。
         :param key: 要查询的键。
         :return: 剩余时间（秒），-1表示永不过期，None表示键不存在。
         """
@@ -361,21 +363,24 @@ class Kv:
 
             value, expiry_time = self._data[key]
             if expiry_time == -1:
-                return -1
+                return -1.0
 
-            remaining = int(expiry_time - time.time())
+            remaining = expiry_time - time.time()
             if remaining <= 0:
                 return None  # 已过期，视为不存在
 
             return remaining
 
-    async def extend_ttl(self, key: str, additional_seconds: int) -> bool:
+    async def extend_ttl(self, key: str, additional_seconds: float) -> bool:
         """
         延长指定键的存在时间。
         :param key: 要延长的键。
-        :param additional_seconds: 要添加的秒数。
+        :param additional_seconds: 要添加的秒数（支持浮点数）。
         :return: 如果成功延长则返回True，键不存在则返回False。
         """
+        if not isinstance(additional_seconds, (int, float)):
+            raise TypeError("additional_seconds 必须是数值类型（整数或浮点数）")
+
         async with self._rw_lock.writer():
             if key not in self._data:
                 return False
@@ -508,14 +513,15 @@ class _WLockManager:
 
 # --- 示例用法 ---
 async def main():
-    async with Kv(cleanup_interval=30) as kv_store:  # 30秒清理间隔
-        # 添加不同类型的数据，包含过期时间
+    async with Kv(cleanup_interval=30.0) as kv_store:  # 30秒清理间隔
+        # 添加不同类型的数据，包含浮点数过期时间
         await kv_store.add("user:alice:online", True)  # 永不过期
-        await kv_store.add("user:bob:online", False, ttl=60)  # 60秒后过期
-        await kv_store.add("user:charlie:profile", {"name": "Charlie", "age": 25}, ttl=30)  # 30秒后过期
-        await kv_store.add("temp:session", "abc123", ttl=10)  # 10秒后过期
+        await kv_store.add("user:bob:online", False, ttl=60.5)  # 60.5秒后过期
+        await kv_store.add("user:charlie:profile", {"name": "Charlie", "age": 25}, ttl=30.2)  # 30.2秒后过期
+        await kv_store.add("temp:session", "abc123", ttl=10.8)  # 10.8秒后过期
         await kv_store.add("config:max_users", 100)  # 永不过期
         await kv_store.add("nullable:value", None)  # None值，永不过期
+        await kv_store.add("quick:data", "fast", ttl=2.5)  # 2.5秒后过期
 
         print("--- 初始数据 ---")
         print(f"所有键: {await kv_store.keys()}")
@@ -532,25 +538,32 @@ async def main():
         nullable_value = await kv_store.get("nullable:value")
         print(f"可空值: {nullable_value}")
 
-        # 检查TTL
+        # 检查TTL（浮点数精度）
         print("\n--- 检查TTL ---")
         print(f"Alice TTL: {await kv_store.get_ttl('user:alice:online')}")
-        print(f"Bob TTL: {await kv_store.get_ttl('user:bob:online')}")
-        print(f"Charlie TTL: {await kv_store.get_ttl('user:charlie:profile')}")
-        print(f"Session TTL: {await kv_store.get_ttl('temp:session')}")
+        print(f"Bob TTL: {await kv_store.get_ttl('user:bob:online'):.2f}")
+        print(f"Charlie TTL: {await kv_store.get_ttl('user:charlie:profile'):.2f}")
+        print(f"Session TTL: {await kv_store.get_ttl('temp:session'):.2f}")
+        print(f"Quick data TTL: {await kv_store.get_ttl('quick:data'):.2f}")
 
-        # 延长TTL
+        # 延长TTL（使用浮点数）
         print("\n--- 延长TTL ---")
-        extended = await kv_store.extend_ttl("temp:session", 20)
+        extended = await kv_store.extend_ttl("temp:session", 20.7)
         print(f"Session TTL 延长成功: {extended}")
-        print(f"Session 新TTL: {await kv_store.get_ttl('temp:session')}")
+        print(f"Session 新TTL: {await kv_store.get_ttl('temp:session'):.2f}")
 
         # 等待一些数据过期
         print("\n--- 等待过期 ---")
-        print("等待15秒...")
+        print("等待3秒，观察快速数据过期...")
+        await asyncio.sleep(3)
+
+        print(f"3秒后所有键: {await kv_store.keys()}")
+        print(f"快速数据（应该已过期）: {await kv_store.get('quick:data', '已过期')}")
+
+        print("\n等待15秒...")
         await asyncio.sleep(15)
 
-        print(f"15秒后所有键: {await kv_store.keys()}")
+        print(f"18秒后所有键: {await kv_store.keys()}")
         print(f"Charlie 的资料（可能已过期）: {await kv_store.get('user:charlie:profile', '已过期')}")
 
         # 计数
