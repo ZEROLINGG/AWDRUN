@@ -20,8 +20,9 @@ class Config:
         {"part": "once", "flag": {"hdp": "hd"}},
         {"part": "once", "matchId": {"hdp": "hd"}}
     ]
-    flag_endpoint = "/slab-match/api/v1/player/answer-panel/answer"
     
+    flag_endpoint = "/slab-match/api/v1/player/answer-panel/answer"
+    flag_ip = "192.168.127.12"
     
     
     
