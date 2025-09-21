@@ -1,3 +1,0 @@
-﻿from send import Send
-
-

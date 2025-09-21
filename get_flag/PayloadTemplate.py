@@ -1,4 +1,5 @@
-﻿import time
+﻿"""grt_flag/PayloadTemplate.py"""
+import time
 import sys
 import requests
 
