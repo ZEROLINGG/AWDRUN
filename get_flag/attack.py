@@ -106,10 +106,10 @@ class Attack:
 
         task_list = [asyncio.create_task(coro) for coro in coros]
         self._tasks[_uuid] = task_list
-
         # 在后台运行任务，不阻塞
-        # 可以通过 await_tasks 方法等待完成
-
+        lis = await self.kv.get(f"tasks:", [])
+        lis.extend(_uuid)
+        await self.kv.add(f"tasks:", lis)
         return _uuid, num
 
     async def await_tasks(self, _uuid: str) -> list[Any]:
