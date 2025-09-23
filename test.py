@@ -1,120 +1,286 @@
-﻿import time  # 导入时间模块，用于模拟任务延迟
-import threading  # 导入线程模块（在此代码中未直接使用，但可用于并发任务）
-from rich.progress import Progress, TaskID, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
-# 导入Rich库中的进度条相关组件
-from rich.console import Console  # 用于在终端打印Rich格式化文本
-from concurrent.futures import ThreadPoolExecutor  # 可用于线程池（本示例未使用线程池）
+﻿import time
+import threading
+from rich.console import Console
+from rich.layout import Layout
+from rich.panel import Panel
+from rich.progress import (
+    Progress,
+    TaskID,
+    BarColumn,
+    TextColumn,
+    TimeRemainingColumn,
+    MofNCompleteColumn,
+    SpinnerColumn
+)
+from rich.text import Text
+from rich.align import Align
+from rich.table import Table
+from rich.live import Live
+from rich import box
+import keyboard
+import sys
 
-# 创建一个Rich控制台实例，用于打印带格式的输出
-console = Console()
+class ComplexTerminal:
+    def __init__(self):
+        self.console = Console()
+        self.layout = Layout()
+        self.running = True
+        self.user_input = ""
+        self.current_option = 0
+        self.options = ["开始任务", "暂停任务", "重置进度", "查看详情", "退出程序"]
 
-def rich_multiple_progress_example():
-    """使用Rich库创建多行进度条示例"""
-    console.print("[bold blue]使用Rich库的多行进度条示例[/bold blue]")  # 打印标题，蓝色加粗
+        # 进度条相关
+        self.progress = None
+        self.main_task_id = None
+        self.sub_task_id = None
+        self.spinner_task_id = None
+        self.counter = 0
+        self.task_paused = False
 
-    # 使用Progress上下文管理器创建一个进度条容器
-    with Progress(
-            SpinnerColumn(),  # 添加旋转动画列，显示任务正在进行
-            TextColumn("[progress.description]{task.description}"),  # 显示任务描述
-            BarColumn(),  # 显示进度条
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),  # 显示百分比进度
-            TimeRemainingColumn(),  # 显示预计剩余时间
-    ) as progress:
+        # 设置布局
+        self.setup_layout()
+        self.setup_progress()
 
-        # 添加三个不同的任务，每个任务都有总进度值total
-        task1 = progress.add_task("下载数据...", total=100)
-        task2 = progress.add_task("处理图片...", total=80)
-        task3 = progress.add_task("生成报告...", total=60)
+    def setup_layout(self):
+        """设置终端布局"""
+        self.layout.split_column(
+            Layout(name="header", size=5),      # 艺术字和摘要
+            Layout(name="progress", size=10),   # 进度条区域
+            Layout(name="control", minimum_size=8)  # 控制区域
+        )
 
-        # 使用循环模拟任务进度更新，直到所有任务完成
-        while not progress.finished:
-            # 如果任务未完成，则增加进度
-            if not progress.tasks[task1].finished:
-                progress.update(task1, advance=2)  # task1每次增加2单位进度
+    def setup_progress(self):
+        """设置进度条"""
+        self.progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]{task.fields[name]}"),
+            BarColumn(bar_width=40),
+            TextColumn("[progress.percentage]{task.percentage:>3.1f}%"),
+            MofNCompleteColumn(),
+            TimeRemainingColumn(),
+            console=self.console
+        )
 
-            if not progress.tasks[task2].finished:
-                progress.update(task2, advance=1)  # task2每次增加1单位进度
+        # 添加不同类型的任务
+        self.main_task_id = self.progress.add_task(
+            "主任务",
+            name="总进度",
+            total=100
+        )
 
-            if not progress.tasks[task3].finished:
-                progress.update(task3, advance=1.5)  # task3每次增加1.5单位进度
+        self.sub_task_id = self.progress.add_task(
+            "子任务",
+            name="处理文件",
+            total=50
+        )
 
-            time.sleep(0.1)  # 模拟任务执行间隔
+        self.spinner_task_id = self.progress.add_task(
+            "后台任务",
+            name="监控系统",
+            total=None  # 无限进度条（旋转器）
+        )
 
-def rich_nested_progress_example():
-    """Rich库嵌套进度条示例"""
-    console.print("\n[bold green]Rich嵌套进度条示例[/bold green]")  # 打印绿色标题
+    def create_header(self):
+        """创建顶部艺术字和摘要"""
+        art_text = Text()
+        art_text.append("╔═══════════════════════════════════╗\n║              AWDRUN               ║\n╚═══════════════════════════════════╝", style="cyan bold")
+        status = "暂停中" if self.task_paused else "运行中"
+        status_style = "yellow" if self.task_paused else "green"
+        summary = Text(f"本次运行摘要: 已处理 {self.counter} 个项目 | 状态: {status}", style=status_style)
 
-    # 创建进度条容器
-    with Progress() as progress:
-        # 添加总任务，用于表示整体进度
-        overall_task = progress.add_task("整体进度", total=3)
+        header_content = Text()
+        header_content.append(art_text)
+        header_content.append("\n")
+        header_content.append(summary)
 
-        # 模拟三个阶段的任务
-        for i, phase in enumerate(["初始化", "执行", "清理"], 1):
-            progress.update(overall_task, description=f"阶段 {i}: {phase}")  # 更新总任务描述
+        return Panel(
+            Align.center(header_content),
+            box=box.DOUBLE,
+            style="bright_blue"
+        )
 
-            # 为每个阶段创建子任务
-            subtask = progress.add_task(f"  {phase}步骤", total=20)
+    def create_progress_panel(self):
+        """创建进度条面板"""
+        # 创建计数器统计表格
+        stats_table = Table(show_header=False, box=None, padding=(0, 2))
+        stats_table.add_column("Metric", style="cyan", width=12)
+        stats_table.add_column("Value", style="yellow", justify="right", width=8)
 
-            # 更新子任务进度
-            for j in range(20):
-                time.sleep(0.05)  # 模拟执行时间
-                progress.update(subtask, advance=1)  # 每次进度+1
+        stats_table.add_row("总计数:", str(self.counter))
+        stats_table.add_row("成功:", str(max(0, self.counter - self.counter // 10)))
+        stats_table.add_row("失败:", str(self.counter // 10))
+        stats_table.add_row("成功率:", f"{max(0, 100 - self.counter // 10 * 10)}%")
 
-            # 子任务完成后，从进度条中移除
-            progress.remove_task(subtask)
-            # 更新总任务进度
-            progress.update(overall_task, advance=1)
+        # 将进度条和统计表格组合
+        progress_layout = Layout()
+        progress_layout.split_row(
+            Layout(Panel(self.progress, title="[bold yellow]任务进度[/bold yellow]", border_style="yellow"), ratio=2),
+            Layout(Panel(stats_table, title="[bold cyan]统计信息[/bold cyan]", border_style="cyan"), ratio=1)
+        )
 
-def rich_custom_columns_example():
-    """自定义列的Rich进度条示例"""
-    console.print("\n[bold magenta]自定义列的Rich进度条[/bold magenta]")  # 打印标题
+        return progress_layout
 
-    # 自定义进度条显示的列，包括文件名、进度条、百分比、速度和剩余时间
-    progress = Progress(
-        TextColumn("[bold blue]{task.fields[filename]}", justify="right"),  # 显示文件名
-        BarColumn(bar_width=None),  # 显示进度条
-        "[progress.percentage]{task.percentage:>3.1f}%",  # 百分比
-        "•",  # 分隔符
-        TextColumn("[bold green]{task.fields[speed]}"),  # 当前速度
-        "•",  # 分隔符
-        TimeRemainingColumn(),  # 剩余时间
-    )
+    def create_control_panel(self):
+        """创建控制面板"""
+        # 操作选项
+        options_text = Text("操作选项:\n", style="bold white")
+        for i, option in enumerate(self.options):
+            prefix = "► " if i == self.current_option else "  "
+            style = "black on white" if i == self.current_option else "white"
+            options_text.append(f"{prefix}{i+1}. {option}\n", style=style)
 
-    with progress:
-        # 模拟多个文件下载任务
-        files = [
-            {"name": "video.mp4", "size": 1000, "speed": "2.1 MB/s"},
-            {"name": "audio.wav", "size": 500, "speed": "1.8 MB/s"},
-            {"name": "data.zip", "size": 800, "speed": "3.2 MB/s"}
-        ]
+        # 操作提示
+        help_text = Text("\n操作提示:\n", style="bold cyan")
+        help_text.append("↑/↓ - 选择选项 | Enter/Space - 确认 | Esc - 退出 | R - 重置\n", style="dim white")
 
-        tasks = []
-        # 为每个文件添加任务，并设置自定义字段filename和speed
-        for file_info in files:
-            task = progress.add_task(
-                "download",
-                filename=file_info["name"],
-                speed=file_info["speed"],
-                total=file_info["size"]
-            )
-            tasks.append(task)
+        # 状态信息
+        task_status = "暂停" if self.task_paused else "运行"
+        status_style = "yellow" if self.task_paused else "green"
+        status_text = Text(f"\n任务状态: ", style="white")
+        status_text.append(task_status, style=status_style)
 
-        # 模拟文件下载进度更新
-        while not progress.finished:
-            for i, task in enumerate(tasks):
-                if not progress.tasks[task].finished:
-                    progress.update(task, advance=10)  # 增加进度
-                    # 动态更新速度信息
-                    current_speed = f"{2.0 + i * 0.5:.1f} MB/s"
-                    progress.update(task, speed=current_speed)
+        # 当前输入
+        input_text = Text(f"\n输入信息: {self.user_input}", style="yellow")
 
-            time.sleep(0.1)  # 模拟下载延迟
+        control_content = Text()
+        control_content.append(options_text)
+        control_content.append(help_text)
+        control_content.append(status_text)
+        control_content.append(input_text)
 
-# 程序入口
+        return Panel(
+            control_content,
+            title="[bold red]终端控制[/bold red]",
+            border_style="red"
+        )
+
+    def update_display(self):
+        """更新显示内容"""
+        self.layout["header"].update(self.create_header())
+        self.layout["progress"].update(self.create_progress_panel())
+        self.layout["control"].update(self.create_control_panel())
+
+    def handle_input(self):
+        """处理用户输入（在单独线程中运行）"""
+        while self.running:
+            try:
+                if keyboard.is_pressed('up'):
+                    self.current_option = (self.current_option - 1) % len(self.options)
+                    time.sleep(0.2)
+                elif keyboard.is_pressed('down'):
+                    self.current_option = (self.current_option + 1) % len(self.options)
+                    time.sleep(0.2)
+                elif keyboard.is_pressed('enter') or keyboard.is_pressed('space'):
+                    self.execute_option()
+                    time.sleep(0.2)
+                elif keyboard.is_pressed('esc'):
+                    self.running = False
+                    break
+                elif keyboard.is_pressed('r'):
+                    self.reset_progress()
+                    time.sleep(0.2)
+            except:
+                # 处理键盘监听异常
+                pass
+            time.sleep(0.1)
+
+    def execute_option(self):
+        """执行选中的选项"""
+        option = self.options[self.current_option]
+        if option == "开始任务":
+            self.task_paused = False
+            self.user_input = "任务已启动"
+            # 手动推进进度
+            if self.counter < 100:
+                self.counter += 5
+                self.update_progress()
+
+        elif option == "暂停任务":
+            self.task_paused = True
+            self.user_input = "任务已暂停"
+
+        elif option == "重置进度":
+            self.reset_progress()
+            self.user_input = "进度已重置"
+
+        elif option == "查看详情":
+            main_progress = self.progress.tasks[0].percentage
+            sub_progress = self.progress.tasks[1].percentage
+            self.user_input = f"主任务: {main_progress:.1f}%, 子任务: {sub_progress:.1f}%"
+
+        elif option == "退出程序":
+            self.running = False
+
+    def reset_progress(self):
+        """重置所有进度"""
+        self.counter = 0
+        self.task_paused = False
+        self.progress.reset(self.main_task_id)
+        self.progress.reset(self.sub_task_id)
+
+    def update_progress(self):
+        """更新进度条"""
+        # 更新主任务进度（基于计数器）
+        main_completed = min(self.counter, 100)
+        self.progress.update(self.main_task_id, completed=main_completed)
+
+        # 更新子任务进度（以不同速度）
+        sub_completed = min(self.counter * 2, 50)
+        self.progress.update(self.sub_task_id, completed=sub_completed)
+
+        # 旋转器任务持续运行
+        self.progress.advance(self.spinner_task_id)
+
+    def auto_update_counter(self):
+        """自动更新计数器（模拟后台任务）"""
+        while self.running:
+            time.sleep(1.5)  # 每1.5秒更新一次
+            if self.running and not self.task_paused:
+                if self.counter < 100:  # 防止无限增长
+                    self.counter += 1
+                    self.update_progress()
+
+    def run(self):
+        """运行主程序"""
+        # 启动输入处理线程
+        input_thread = threading.Thread(target=self.handle_input, daemon=True)
+        input_thread.start()
+
+        # 启动自动计数器线程
+        counter_thread = threading.Thread(target=self.auto_update_counter, daemon=True)
+        counter_thread.start()
+
+        # 主显示循环
+        try:
+            with Live(self.layout, console=self.console, refresh_per_second=24) as live:
+                while self.running:
+                    self.update_display()
+                    # 即使任务暂停，旋转器依然转动
+                    if not self.task_paused:
+                        self.progress.advance(self.spinner_task_id)
+                    time.sleep(0.25)
+        finally:
+            self.console.print("\n[bold red]程序已退出，感谢使用！[/bold red]")
+
 if __name__ == "__main__":
-    rich_multiple_progress_example()  # 多行进度条示例
-    # rich_nested_progress_example()    # 嵌套进度条示例
-    # rich_custom_columns_example()     # 自定义列进度条示例
+    try:
+        # 检查终端支持
+        console = Console()
+        if not console.is_terminal:
+            print("警告: 当前环境可能不完全支持富文本显示")
 
-    console.print("\n[bold cyan]所有Rich示例完成！[/bold cyan]")  # 打印完成提示
+        terminal = ComplexTerminal()
+        console.print("[bold green]启动复杂终端管理系统...[/bold green]")
+
+        time.sleep(1)
+        terminal.run()
+
+    except KeyboardInterrupt:
+        print("\n程序被用户中断 (Ctrl+C)")
+    except ImportError as e:
+        print(f"缺少依赖库: {e}")
+        print("请运行: pip install rich keyboard")
+    except Exception as e:
+        print(f"程序出错: {e}")
+        import traceback
+        traceback.print_exc()
