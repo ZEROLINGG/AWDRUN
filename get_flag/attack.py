@@ -51,7 +51,7 @@ class Attack:
 
         async def payload_coro(ip: str, i: int):
             r = {'success': False, 'flag': "", 'err': "", 'ok': False}
-            await self.kv.add(f"p:{_uuid}:{i}", r)  # 会在另一个监控线程中使用到
+            await self.kv.add(f"p:{_uuid}:{name}:{i}", r)  # 会在另一个监控线程中使用到
 
             async def execute_payload():
                 try:
@@ -83,7 +83,7 @@ class Attack:
             async with self._log_lock:
                 async with aiofiles.open(log, "a", encoding="utf-8") as f:
                     await f.write(log_msg)
-            await self.kv.add(f"p:{_uuid}:{i}", r)
+            await self.kv.add(f"p:{_uuid}:{name}:{i}", r)
 
         ips = await self._get_ip(name)
         tasks = [payload_coro(ip, i) for i, ip in enumerate(ips)]
