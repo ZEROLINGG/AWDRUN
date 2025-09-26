@@ -1,9 +1,10 @@
 ﻿import json
+import asyncio
 from dataclasses import dataclass
 from typing import Dict, Any, Optional
 from urllib.parse import urljoin, urlparse
-import requests
-from requests import Response
+import aiohttp
+from aiohttp import ClientResponse, ClientSession
 
 from config import Config
 
@@ -20,25 +21,52 @@ class Send:
         'Accept-Encoding': 'gzip, deflate, br',
         'matchId': '',
     }
-    def __init__(self, url: str, port: int = 80, timeout: int = 10):
+
+    def __init__(self, url: str, timeout: int = 10, usehttp: bool = False):
         """
-        初始化 Send 类，设置基础 URL 和默认超时时间。
+        初始化 AsyncSend 类，设置基础 URL 和默认超时时间。
 
         Args:
             url (str): 主机地址，例如 'http://example.com' 或 'example.com'
-            port (int): 端口号，默认为 80
             timeout (int): 请求超时时间（秒），默认为 10 秒
+            usehttp (bool): 是否强制使用 http 协议
         """
+        # 补全协议
         if not url.startswith(('http://', 'https://')):
-            url = f'https://{url}'  # 默认 HTTPS
-        url = url.rstrip('/')  # 去除末尾斜杠
+            if usehttp:
+                url = f'http://{url}'
+            else:
+                url = f'https://{url}'
+        # 去除末尾斜杠
+        url = url.rstrip('/')
+        # 验证 URL 格式
         parsed_url = urlparse(url)
         if not parsed_url.scheme or not parsed_url.netloc:
             raise ValueError(f"Invalid URL format: {url}")
-        self.base_url = f"{parsed_url.scheme}://{parsed_url.netloc}:{port}" if port != 80 and port != 443 else f"{parsed_url.scheme}://{parsed_url.netloc}"
-        self.timeout = timeout
-        self.session = requests.Session()
-        self.session.headers.update(self.headers)
+
+        self.base_url = parsed_url
+        self.timeout = aiohttp.ClientTimeout(total=timeout)
+        self.session: Optional[ClientSession] = None
+        self._session_headers = self.headers.copy()
+
+    async def __aenter__(self):
+        """异步上下文管理器入口"""
+        await self._ensure_session()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """异步上下文管理器出口"""
+        await self.close()
+
+    async def _ensure_session(self):
+        """确保 session 已创建"""
+        if self.session is None or self.session.closed:
+            connector = aiohttp.TCPConnector(ssl=False)  # 如需要 SSL 验证可设为 True
+            self.session = aiohttp.ClientSession(
+                headers=self._session_headers,
+                timeout=self.timeout,
+                connector=connector
+            )
 
     def set_header(self, key: str, value: str) -> None:
         """
@@ -48,7 +76,9 @@ class Send:
             key (str): header 键
             value (str): header 值
         """
-        self.session.headers[key] = value
+        self._session_headers[key] = value
+        if self.session and not self.session.closed:
+            self.session.headers[key] = value
 
     def set_headers(self, headers: Dict[str, str]) -> None:
         """
@@ -57,39 +87,48 @@ class Send:
         Args:
             headers (Dict[str, str]): 要更新的 headers 字典
         """
-        self.session.headers.update(headers)
+        self._session_headers.update(headers)
+        if self.session and not self.session.closed:
+            self.session.headers.update(headers)
 
-
-    def get(self, endpoint: str, params: Optional[Dict] = None, headers: Optional[Dict] = None, **kwargs) -> Response:
+    async def get(self, endpoint: str, params: Optional[Dict] = None, headers: Optional[Dict] = None, **kwargs) -> ClientResponse:
         """
-        发送 GET 请求。
+        发送异步 GET 请求。
 
         Args:
             endpoint (str): API 端点路径
             params (Optional[Dict]): 查询参数
             headers (Optional[Dict]): 自定义 headers
-            **kwargs: 其他 requests 参数
+            **kwargs: 其他 aiohttp 参数
 
         Returns:
-            response: response 数据
+            ClientResponse: 响应对象
         """
-        r = self.session.get(f"{self.base_url}{endpoint}", params=params, headers=headers, timeout=self.timeout, **kwargs)
-        return r
+        await self._ensure_session()
+        url = f"{self.base_url}{endpoint}"
 
-    def post(self, endpoint: str, data: Dict|None, headers: Optional[Dict] = None, useform:bool=False, **kwargs) -> Response:
+        async with self.session.get(url, params=params, headers=headers, **kwargs) as response:
+            # 读取响应内容以避免连接被提前关闭
+            await response.read()
+            return response
+
+    async def post(self, endpoint: str, data: Dict = None, headers: Optional[Dict] = None, useform: bool = False, **kwargs) -> ClientResponse:
         """
-        发送 POST 请求。
+        发送异步 POST 请求。
 
         Args:
             endpoint (str): API 端点路径
             data (Optional[Dict]): 请求体数据
             headers (Optional[Dict]): 自定义 headers
             useform (bool): 是否使用表单方案
-            **kwargs: 其他 requests 参数
+            **kwargs: 其他 aiohttp 参数
 
         Returns:
-            response: response 数据
+            ClientResponse: 响应对象
         """
+        await self._ensure_session()
+        url = f"{self.base_url}{endpoint}"
+
         if not useform:
             if isinstance(data, dict):
                 kwargs['json'] = data
@@ -97,18 +136,20 @@ class Send:
                 kwargs['data'] = data
         else:
             kwargs['data'] = data
-            
-        r = self.session.post(f"{self.base_url}{endpoint}", headers=headers, timeout=self.timeout, **kwargs)
-        return r
 
+        async with self.session.post(url, headers=headers, **kwargs) as response:
+            # 读取响应内容以避免连接被提前关闭
+            await response.read()
+            return response
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """
         关闭 Session，释放连接。
         """
-        self.session.close()
-        
-    
+        if self.session and not self.session.closed:
+            await self.session.close()
+            self.session = None
+
     @dataclass
     class FlagInfo:
         """Flag提交信息类"""
@@ -117,45 +158,73 @@ class Send:
         headers: Optional[Dict] = None
         params: Optional[Dict] = None
         method: str = "POST"
-    
-    def send_flag(self, flag_info: FlagInfo) -> tuple[bool, str]:
+        name: str = ""
+
+    async def send_flag(self, flag_info: FlagInfo) -> tuple[bool, str]:
+        """
+        异步发送 flag。
+
+        Args:
+            flag_info (FlagInfo): flag 信息
+
+        Returns:
+            tuple[bool, str]: (是否成功, 错误信息)
+        """
         try:
             if flag_info.method == "POST":
-                r = self.post(flag_info.endpoint, data=flag_info.data, headers=flag_info.headers, params=flag_info.params)
+                response = await self.post(flag_info.endpoint, data=flag_info.data, headers=flag_info.headers)
+                if flag_info.params:
+                    # 如果需要同时传递 params，需要手动构造 URL
+                    import urllib.parse
+                    query_string = urllib.parse.urlencode(flag_info.params)
+                    endpoint_with_params = f"{flag_info.endpoint}?{query_string}"
+                    response = await self.post(endpoint_with_params, data=flag_info.data, headers=flag_info.headers)
             elif flag_info.method == "GET":
-                r = self.get(flag_info.endpoint, params=flag_info.params, headers=flag_info.headers)
+                response = await self.get(flag_info.endpoint, params=flag_info.params, headers=flag_info.headers)
             else:
-                return False,f"Invalid flag method: {flag_info.method}"
-            r.raise_for_status()
+                return False, f"Invalid flag method: {flag_info.method}"
+
+            # 检查 HTTP 状态码
+            response.raise_for_status()
+
             try:
-                result = r.json()
-            except (ValueError, json.decoder.JSONDecodeError):
-                result = r.content.decode(errors="ignore")
+                # 尝试解析 JSON
+                result = await response.json()
+            except (ValueError, json.JSONDecodeError):
+                # 如果不是 JSON，读取文本内容
+                result = await response.text()
 
             if isinstance(result, dict):
                 field = ["data", "code", "message", "info", "msg"]
                 for f in field:
-                    if str(result.get(f, "")).lower() in ["ok", "success", "成功"]:
+                    field_value = str(result.get(f, "")).lower()
+                    if field_value in ["ok", "success", "成功"]:
                         return True, ""
-                    if str(result.get(f, "")).lower() in ["error", "错误", "重新提交", "失败"]:
-                        return False, json.dumps(result)
-                return False, "[未能解析的结果]：\n" + json.dumps(result)
+                    if field_value in ["error", "错误", "重新提交", "失败"]:
+                        return False, json.dumps(result, ensure_ascii=False)
+                return False, "[未能解析的结果]：\n" + json.dumps(result, ensure_ascii=False)
+
             if isinstance(result, str):
                 field_success = ["ok", "success", "成功"]
                 field_error = ["error", "错误", "重新提交", "失败"]
+                result_lower = result.lower()
+
                 for f in field_success:
-                    if f in result.lower():
+                    if f in result_lower:
                         return True, ""
-                    
+
                 for f in field_error:
-                    if f in result.lower():
+                    if f in result_lower:
                         return False, result
                 return False, "[未能解析的结果]：\n" + result
-            
+
             try:
-                result = r.content.hex()
+                # 读取原始字节内容并转为十六进制
+                content_bytes = await response.read()
+                result = content_bytes.hex()
                 field_success = ["6f6b", "73756363657373", "e68890e58a9f"]
-                field_error = ["error","e99499e8afaf","e9878de696b0e68f90e4baa4","e5a4b1e8b4a5"]
+                field_error = ["6572726f72", "e99499e8afaf", "e9878de696b0e68f90e4baa4", "e5a4b1e8b4a5"]
+
                 for f in field_success:
                     if f in result:
                         return True, ""
@@ -164,12 +233,16 @@ class Send:
                     if f in result:
                         return False, result
                 return False, "[未能解析的结果]：\n" + result
-            
+
             except Exception as ex:
                 return False, str(ex)
-        
+
+        except aiohttp.ClientError as ex:
+            return False, f"请求错误: {str(ex)}"
+        except asyncio.TimeoutError:
+            return False, "请求超时"
         except Exception as ex:
-            return False,str(ex)
+            return False, str(ex)
 
 
 def get_flag_info(config: Config, name: str, flag: str, **kwargs) -> Send.FlagInfo:
@@ -242,14 +315,40 @@ def get_flag_info(config: Config, name: str, flag: str, **kwargs) -> Send.FlagIn
     params_final = p or None
 
     return Send.FlagInfo(endpoint=config.flag_endpoint,
-                         data=data_final,
-                         headers=headers_final,
-                         params=params_final)
+                              data=data_final,
+                              headers=headers_final,
+                              params=params_final,
+                              name=name
+                         )
 
 
-        
+# 使用示例
+async def example_usage():
+    """使用示例"""
+    # 方式1：使用异步上下文管理器（推荐）
+    async with Send("https://example.com", timeout=30) as client:
+        client.set_header("Authorization", "Bearer your_token")
 
+        # GET 请求
+        response = await client.get("/api/data", params={"page": 1})
+        data = await response.json()
+        print(data)
+
+        # POST 请求
+        response = await client.post("/api/submit", data={"key": "value"})
+        result = await response.text()
+        print(result)
+
+    # 方式2：手动管理生命周期
+    client = Send("https://example.com")
+    try:
+        response = await client.get("/api/test")
+        print(await response.text())
+    finally:
+        await client.close()
 
 
 if __name__ == "__main__":
-    pass
+    # 运行示例
+    asyncio.run(example_usage())
+    
